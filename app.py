@@ -1,168 +1,197 @@
 import csv
 import os
-import re
-from datetime import datetime, timezone, timedelta
+import random
+import string
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, Request, Form, HTTPException
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-KST = timezone(timedelta(hours=9))
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
-LINKS_CSV = DATA_DIR / "links.csv"
-CLICKS_CSV = DATA_DIR / "clicks.csv"
+APP_TITLE = "미샵 단축링크 관리자"
+DATA_DIR = Path("data")
+LINKS_FILE = DATA_DIR / "links.csv"
+CLICKS_FILE = DATA_DIR / "clicks.csv"
+COUNTER_FILE = DATA_DIR / "counter.txt"
 
 ADMIN_ID = os.getenv("ADMIN_ID", "misharp")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "misharp1234")
-SECRET_KEY = os.getenv("SECRET_KEY", "change-this-secret-key")
-BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
+SECRET_KEY = os.getenv("SECRET_KEY", "change-me-misharp-shortlink-secret")
+BASE_DOMAIN = os.getenv("BASE_DOMAIN", "")  # 예: https://msh.kr
 
-ALLOWED_DOMAINS = [
+ALLOWED_TARGET_HOSTS = {
     "misharp.co.kr",
     "www.misharp.co.kr",
-    "misharp.kr",
-    "www.misharp.kr",
-]
+}
 
-app = FastAPI(title="MISHARP Shortlink Maker")
+app = FastAPI(title=APP_TITLE)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax", https_only=False)
 
 
-def now_str() -> str:
-    return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+def ensure_files() -> None:
+    DATA_DIR.mkdir(exist_ok=True)
+    if not LINKS_FILE.exists():
+        with LINKS_FILE.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["code", "target_url", "memo", "active", "created_at"])
+            writer.writeheader()
+    if not CLICKS_FILE.exists():
+        with CLICKS_FILE.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["timestamp", "code", "target_url", "ip", "user_agent", "referer"])
+            writer.writeheader()
+    if not COUNTER_FILE.exists():
+        COUNTER_FILE.write_text("1", encoding="utf-8")
 
 
-def ensure_csv():
-    if not LINKS_CSV.exists():
-        with LINKS_CSV.open("w", newline="", encoding="utf-8-sig") as f:
-            csv.DictWriter(f, fieldnames=["code", "target_url", "memo", "active", "created_at"]).writeheader()
-    if not CLICKS_CSV.exists():
-        with CLICKS_CSV.open("w", newline="", encoding="utf-8-sig") as f:
-            csv.DictWriter(f, fieldnames=["code", "clicked_at", "ip", "user_agent", "referer"]).writeheader()
-
-
-def read_links():
-    ensure_csv()
-    with LINKS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
+def read_links() -> List[Dict[str, str]]:
+    ensure_files()
+    with LINKS_FILE.open("r", newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
-def write_links(rows):
-    ensure_csv()
-    with LINKS_CSV.open("w", newline="", encoding="utf-8-sig") as f:
+def write_links(rows: List[Dict[str, str]]) -> None:
+    ensure_files()
+    with LINKS_FILE.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["code", "target_url", "memo", "active", "created_at"])
         writer.writeheader()
         writer.writerows(rows)
 
 
-def read_clicks():
-    ensure_csv()
-    with CLICKS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
-
-
-def add_click(code: str, request: Request):
-    ensure_csv()
-    ua = request.headers.get("user-agent", "")
-    referer = request.headers.get("referer", "")
-    ip = request.client.host if request.client else ""
-    with CLICKS_CSV.open("a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=["code", "clicked_at", "ip", "user_agent", "referer"])
-        writer.writerow({"code": code, "clicked_at": now_str(), "ip": ip, "user_agent": ua, "referer": referer})
-
-
-def is_logged_in(request: Request) -> bool:
-    return request.session.get("logged_in") is True
-
-
-def require_login(request: Request):
-    if not is_logged_in(request):
-        return RedirectResponse("/", status_code=303)
+def find_link(code: str) -> Optional[Dict[str, str]]:
+    for row in read_links():
+        if row.get("code") == code:
+            return row
     return None
 
 
-def escape(s: Optional[str]) -> str:
-    s = s or ""
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+def click_counts() -> Dict[str, int]:
+    ensure_files()
+    counts: Dict[str, int] = {}
+    with CLICKS_FILE.open("r", newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            code = row.get("code", "")
+            counts[code] = counts.get(code, 0) + 1
+    return counts
 
 
-def normalize_url(url: str) -> str:
-    url = (url or "").strip()
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    return url
+def recent_clicks(limit: int = 50) -> List[Dict[str, str]]:
+    ensure_files()
+    with CLICKS_FILE.open("r", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    return list(reversed(rows[-limit:]))
 
 
-def validate_target_url(url: str):
-    parsed = urlparse(url)
-    if parsed.scheme not in ["http", "https"] or not parsed.netloc:
-        raise ValueError("올바른 URL이 아닙니다.")
-    host = parsed.netloc.lower().split(":")[0]
-    if host not in ALLOWED_DOMAINS:
-        raise ValueError("미샵 도메인만 등록할 수 있습니다. misharp.co.kr 링크를 입력하세요.")
+def is_valid_target_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        return parsed.scheme in {"http", "https"} and parsed.netloc.lower() in ALLOWED_TARGET_HOSTS
+    except Exception:
+        return False
 
 
-def validate_code(code: str):
-    code = (code or "").strip()
-    if not re.fullmatch(r"[A-Za-z0-9_-]{2,40}", code):
-        raise ValueError("단축코드는 영문/숫자/하이픈/언더바 2~40자로 입력하세요.")
+def normalize_code(code: str) -> str:
+    allowed = string.ascii_letters + string.digits + "-_"
+    return "".join(ch for ch in code.strip() if ch in allowed)
 
 
-def page(title: str, body: str) -> HTMLResponse:
-    html = f"""<!doctype html>
+def generate_random_code(length: int = 3) -> str:
+    chars = string.ascii_letters + string.digits
+    existing = {row["code"] for row in read_links()}
+    for _ in range(200):
+        code = "".join(random.choices(chars, k=length))
+        if code not in existing:
+            return code
+    # 3자리 공간이 거의 차면 4자리로 자동 확장
+    while True:
+        code = "".join(random.choices(chars, k=length + 1))
+        if code not in existing:
+            return code
+
+
+def generate_sequential_code() -> str:
+    ensure_files()
+    existing = {row["code"] for row in read_links()}
+    num = int(COUNTER_FILE.read_text(encoding="utf-8").strip() or "1")
+    while True:
+        code = str(num).zfill(3)
+        num += 1
+        if code not in existing:
+            COUNTER_FILE.write_text(str(num), encoding="utf-8")
+            return code
+
+
+def make_short_url(request: Request, code: str) -> str:
+    if BASE_DOMAIN:
+        return BASE_DOMAIN.rstrip("/") + "/" + code
+    return str(request.base_url).rstrip("/") + "/" + code
+
+
+def require_login(request: Request) -> bool:
+    return bool(request.session.get("logged_in"))
+
+
+def html_page(title: str, body: str) -> HTMLResponse:
+    return HTMLResponse(f"""
+<!doctype html>
 <html lang="ko">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{escape(title)}</title>
+<title>{title}</title>
 <style>
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;background:#f6f7f9;margin:0;color:#222}}
-.wrap{{max-width:1100px;margin:0 auto;padding:28px}}
-.card{{background:#fff;border-radius:18px;padding:24px;box-shadow:0 8px 28px rgba(0,0,0,.07);margin-bottom:18px}}
-h1{{margin:0 0 18px;font-size:28px}} h2{{font-size:20px;margin:0 0 14px}}
-input,textarea,select{{width:100%;box-sizing:border-box;border:1px solid #ddd;border-radius:12px;padding:12px;font-size:15px;margin:7px 0 14px}}
-button,.btn{{display:inline-block;border:0;background:#111;color:#fff;border-radius:12px;padding:11px 16px;font-weight:700;text-decoration:none;cursor:pointer}}
-.btn2{{background:#eee;color:#111}} .danger{{background:#c62828}}
-table{{width:100%;border-collapse:collapse;font-size:14px}} th,td{{border-bottom:1px solid #eee;padding:10px;text-align:left;vertical-align:top}} th{{background:#fafafa}}
-.small{{font-size:13px;color:#666}} .error{{background:#fff0f0;color:#b00020;padding:12px;border-radius:12px;margin-bottom:12px}}
-.ok{{background:#effff2;color:#0b6b20;padding:12px;border-radius:12px;margin-bottom:12px}}
-.code{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#f2f2f2;padding:2px 6px;border-radius:6px}}
-.top{{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:18px}} .actions a{{margin-left:8px}}
-@media(max-width:700px){{.wrap{{padding:14px}} table{{font-size:12px}} th,td{{padding:7px}}}}
+body {{font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:#f5f6f8; color:#1f2328; margin:0;}}
+.wrap {{max-width:1080px; margin:40px auto; padding:0 18px;}}
+.card {{background:white; border-radius:20px; box-shadow:0 10px 30px rgba(0,0,0,.07); padding:28px; margin-bottom:20px;}}
+h1 {{font-size:28px; margin:0 0 12px;}}
+h2 {{font-size:20px; margin:0 0 16px;}}
+label {{display:block; font-weight:700; margin:14px 0 7px;}}
+input, select {{width:100%; box-sizing:border-box; padding:13px 14px; border:1px solid #d9d9d9; border-radius:12px; font-size:15px;}}
+button, .btn {{display:inline-block; background:#111; color:white; border:0; border-radius:12px; padding:12px 16px; font-weight:800; cursor:pointer; text-decoration:none;}}
+.btn2 {{background:#666;}}
+.btn-danger {{background:#b42318;}}
+small,.muted {{color:#666;}}
+.error {{background:#fff0f0; color:#b42318; padding:12px; border-radius:12px; margin:10px 0;}}
+.success {{background:#effaf3; color:#146c2e; padding:12px; border-radius:12px; margin:10px 0;}}
+table {{width:100%; border-collapse:collapse; font-size:14px;}}
+th,td {{border-bottom:1px solid #eee; padding:10px; text-align:left; vertical-align:top;}}
+th {{background:#fafafa;}}
+.code {{font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-weight:800;}}
+.grid {{display:grid; grid-template-columns:1fr 1fr; gap:18px;}}
+@media(max-width:760px){{.grid{{grid-template-columns:1fr}} table{{font-size:12px}} .wrap{{margin:20px auto}}}}
 </style>
 </head>
-<body><div class="wrap">{body}</div></body></html>"""
-    return HTMLResponse(html)
+<body><div class="wrap">{body}</div></body></html>
+""")
 
 
-@app.get("/health")
+@app.get("/health", response_class=PlainTextResponse)
 def health():
-    return PlainTextResponse("ok")
+    return "ok"
 
 
 @app.get("/", response_class=HTMLResponse)
-def login_page(request: Request, error: str = ""):
-    if is_logged_in(request):
+def root(request: Request, error: str = ""):
+    if require_login(request):
         return RedirectResponse("/admin", status_code=303)
+    err = f'<div class="error">{error}</div>' if error else ""
     body = f"""
-    <div class="card" style="max-width:460px;margin:60px auto;">
-      <h1>미샵 단축링크 관리자</h1>
-      <p class="small">문자 발송용 짧은 링크를 만들고 클릭수를 확인합니다.</p>
-      {f'<div class="error">{escape(error)}</div>' if error else ''}
+    <div class="card" style="max-width:520px;margin:80px auto;">
+      <h1>{APP_TITLE}</h1>
+      <p class="muted">문자 발송용 짧은 링크를 만들고 클릭수를 확인합니다.</p>
+      {err}
       <form method="post" action="/login">
-        <label>아이디</label><input name="admin_id" value="misharp" autocomplete="username">
-        <label>비밀번호</label><input name="password" type="password" autocomplete="current-password">
-        <button type="submit">로그인</button>
+        <label>아이디</label>
+        <input name="admin_id" value="misharp" autocomplete="username">
+        <label>비밀번호</label>
+        <input name="password" type="password" autocomplete="current-password">
+        <div style="margin-top:16px"><button type="submit">로그인</button></div>
       </form>
-      <p class="small">초기값: misharp / misharp1234<br>Render 환경변수에서 반드시 변경하세요.</p>
+      <p><small>초기값: misharp / misharp1234<br>Render 환경변수에서 반드시 변경하세요.</small></p>
     </div>
     """
-    return page("미샵 단축링크 로그인", body)
+    return html_page(APP_TITLE, body)
 
 
 @app.post("/login")
@@ -180,120 +209,144 @@ def logout(request: Request):
 
 
 @app.get("/admin", response_class=HTMLResponse)
-def admin(request: Request, msg: str = "", error: str = ""):
-    r = require_login(request)
-    if r: return r
+def admin(request: Request, message: str = "", error: str = ""):
+    if not require_login(request):
+        return RedirectResponse("/", status_code=303)
     links = read_links()
-    clicks = read_clicks()
-    count_map = {}
-    for c in clicks:
-        count_map[c.get("code", "")] = count_map.get(c.get("code", ""), 0) + 1
-    host = BASE_URL or str(request.base_url).rstrip("/")
-    rows_html = ""
-    for item in links:
-        code = item["code"]
-        short = f"{host}/{code}"
-        rows_html += f"""
+    counts = click_counts()
+    rows = ""
+    for row in reversed(links):
+        code = row.get("code", "")
+        short_url = make_short_url(request, code)
+        active = row.get("active", "1") == "1"
+        rows += f"""
         <tr>
-          <td><b>{escape(code)}</b><br><span class="small"><a href="/{escape(code)}" target="_blank">{escape(short)}</a></span></td>
-          <td><a href="{escape(item['target_url'])}" target="_blank">{escape(item['target_url'])}</a><br><span class="small">{escape(item.get('memo',''))}</span></td>
-          <td>{'사용중' if item.get('active') == '1' else '중지'}</td>
-          <td>{count_map.get(code, 0)}</td>
-          <td class="small">{escape(item.get('created_at',''))}</td>
+          <td class="code"><a href="/{code}" target="_blank">/{code}</a></td>
+          <td><input value="{short_url}" readonly onclick="this.select()"></td>
+          <td style="max-width:260px;word-break:break-all"><a href="{row.get('target_url','')}" target="_blank">{row.get('target_url','')}</a><br><small>{row.get('memo','')}</small></td>
+          <td>{counts.get(code,0)}</td>
+          <td>{'사용중' if active else '중지'}</td>
           <td>
-            <form method="post" action="/admin/toggle" style="display:inline"><input type="hidden" name="code" value="{escape(code)}"><button class="btn2" type="submit">사용/중지</button></form>
-            <form method="post" action="/admin/delete" style="display:inline" onsubmit="return confirm('삭제할까요?')"><input type="hidden" name="code" value="{escape(code)}"><button class="danger" type="submit">삭제</button></form>
+            <form method="post" action="/toggle/{code}" style="display:inline"><button class="btn2" type="submit">{'중지' if active else '사용'}</button></form>
+            <form method="post" action="/delete/{code}" style="display:inline" onsubmit="return confirm('삭제할까요?')"><button class="btn-danger" type="submit">삭제</button></form>
           </td>
         </tr>"""
-    if not rows_html:
-        rows_html = '<tr><td colspan="6" class="small">아직 생성된 링크가 없습니다.</td></tr>'
+    msg = f'<div class="success">{message}</div>' if message else ""
+    err = f'<div class="error">{error}</div>' if error else ""
+    click_rows = ""
+    for c in recent_clicks(30):
+        ua = c.get("user_agent", "")[:90]
+        click_rows += f"<tr><td>{c.get('timestamp','')}</td><td class='code'>/{c.get('code','')}</td><td>{c.get('ip','')}</td><td>{ua}</td></tr>"
     body = f"""
-    <div class="top"><h1>미샵 단축링크 관리자</h1><div class="actions"><a class="btn btn2" href="/clicks">클릭로그</a><a class="btn btn2" href="/logout">로그아웃</a></div></div>
-    {f'<div class="ok">{escape(msg)}</div>' if msg else ''}
-    {f'<div class="error">{escape(error)}</div>' if error else ''}
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <div><h1>{APP_TITLE}</h1><p class="muted">자동 3자리 랜덤 / 001 순차 / 수동 코드 생성 지원</p></div>
+      <a class="btn btn2" href="/logout">로그아웃</a>
+    </div>
+    {msg}{err}
     <div class="card">
-      <h2>새 단축링크 만들기</h2>
-      <form method="post" action="/admin/create">
-        <label>단축코드</label><input name="code" placeholder="예: sale12, pants12, may-event" required>
-        <label>미샵 원본 URL</label><input name="target_url" placeholder="https://misharp.co.kr/..." required>
-        <label>메모</label><input name="memo" placeholder="예: 전상품 12% 세일 문자">
-        <button type="submit">생성하기</button>
+      <h2>단축링크 만들기</h2>
+      <form method="post" action="/create">
+        <label>미샵 원본 URL</label>
+        <input name="target_url" placeholder="https://misharp.co.kr/..." required>
+        <div class="grid">
+          <div>
+            <label>코드 생성 방식</label>
+            <select name="mode">
+              <option value="random">자동 랜덤 3자리 예: a7K</option>
+              <option value="sequential">자동 순차 001, 002, 003</option>
+              <option value="manual">직접 입력</option>
+            </select>
+          </div>
+          <div>
+            <label>직접 입력 코드</label>
+            <input name="manual_code" placeholder="예: sale12, pants, 001">
+          </div>
+        </div>
+        <label>메모</label>
+        <input name="memo" placeholder="예: 5월 연휴 전상품 12% 문자">
+        <div style="margin-top:16px"><button type="submit">단축링크 생성</button></div>
       </form>
     </div>
     <div class="card">
       <h2>링크 목록</h2>
-      <table><thead><tr><th>단축링크</th><th>원본 URL</th><th>상태</th><th>클릭수</th><th>생성일</th><th>관리</th></tr></thead><tbody>{rows_html}</tbody></table>
+      <table><thead><tr><th>코드</th><th>단축 URL</th><th>원본/메모</th><th>클릭</th><th>상태</th><th>관리</th></tr></thead><tbody>{rows or '<tr><td colspan="6">아직 생성된 링크가 없습니다.</td></tr>'}</tbody></table>
+    </div>
+    <div class="card">
+      <h2>최근 클릭 로그</h2>
+      <table><thead><tr><th>시간</th><th>코드</th><th>IP</th><th>기기/브라우저</th></tr></thead><tbody>{click_rows or '<tr><td colspan="4">아직 클릭 로그가 없습니다.</td></tr>'}</tbody></table>
     </div>
     """
-    return page("미샵 단축링크 관리자", body)
+    return html_page(APP_TITLE, body)
 
 
-@app.post("/admin/create")
-def create_link(request: Request, code: str = Form(...), target_url: str = Form(...), memo: str = Form("")):
-    r = require_login(request)
-    if r: return r
-    try:
-        code = code.strip()
-        target_url = normalize_url(target_url)
-        validate_code(code)
-        validate_target_url(target_url)
-        rows = read_links()
-        if any(x["code"] == code for x in rows):
-            raise ValueError("이미 사용 중인 단축코드입니다.")
-        rows.append({"code": code, "target_url": target_url, "memo": memo.strip(), "active": "1", "created_at": now_str()})
-        write_links(rows)
-        return RedirectResponse(f"/admin?msg={code} 링크가 생성되었습니다", status_code=303)
-    except Exception as e:
-        return RedirectResponse(f"/admin?error={str(e)}", status_code=303)
-
-
-@app.post("/admin/toggle")
-def toggle_link(request: Request, code: str = Form(...)):
-    r = require_login(request)
-    if r: return r
+@app.post("/create")
+def create_link(request: Request, target_url: str = Form(...), mode: str = Form("random"), manual_code: str = Form(""), memo: str = Form("")):
+    if not require_login(request):
+        return RedirectResponse("/", status_code=303)
+    target_url = target_url.strip()
+    if not is_valid_target_url(target_url):
+        return RedirectResponse("/admin?error=미샵 도메인 URL만 등록할 수 있습니다. 예: https://misharp.co.kr/...", status_code=303)
+    if mode == "manual":
+        code = normalize_code(manual_code)
+        if not code:
+            return RedirectResponse("/admin?error=직접 입력 코드를 입력하세요", status_code=303)
+    elif mode == "sequential":
+        code = generate_sequential_code()
+    else:
+        code = generate_random_code(3)
+    if find_link(code):
+        return RedirectResponse(f"/admin?error=이미 사용 중인 코드입니다: {code}", status_code=303)
     rows = read_links()
-    for item in rows:
-        if item["code"] == code:
-            item["active"] = "0" if item.get("active") == "1" else "1"
+    rows.append({"code": code, "target_url": target_url, "memo": memo.strip(), "active": "1", "created_at": datetime.now().isoformat(timespec="seconds")})
     write_links(rows)
-    return RedirectResponse("/admin?msg=상태가 변경되었습니다", status_code=303)
+    short_url = make_short_url(request, code)
+    return RedirectResponse(f"/admin?message=생성 완료: {short_url}", status_code=303)
 
 
-@app.post("/admin/delete")
-def delete_link(request: Request, code: str = Form(...)):
-    r = require_login(request)
-    if r: return r
-    rows = [x for x in read_links() if x["code"] != code]
+@app.post("/toggle/{code}")
+def toggle_link(request: Request, code: str):
+    if not require_login(request):
+        return RedirectResponse("/", status_code=303)
+    rows = read_links()
+    for row in rows:
+        if row.get("code") == code:
+            row["active"] = "0" if row.get("active", "1") == "1" else "1"
     write_links(rows)
-    return RedirectResponse("/admin?msg=삭제되었습니다", status_code=303)
+    return RedirectResponse("/admin?message=상태를 변경했습니다", status_code=303)
 
 
-@app.get("/clicks", response_class=HTMLResponse)
-def clicks_page(request: Request):
-    r = require_login(request)
-    if r: return r
-    clicks = list(reversed(read_clicks()))[:300]
-    rows_html = ""
-    for c in clicks:
-        ua = c.get("user_agent", "")
-        device = "갤럭시/안드로이드" if "Android" in ua else ("아이폰" if "iPhone" in ua else "기타")
-        rows_html += f"<tr><td>{escape(c.get('clicked_at',''))}</td><td>{escape(c.get('code',''))}</td><td>{escape(device)}</td><td class='small'>{escape(c.get('ip',''))}</td><td class='small'>{escape(ua[:160])}</td></tr>"
-    if not rows_html:
-        rows_html = '<tr><td colspan="5" class="small">아직 클릭 로그가 없습니다.</td></tr>'
-    body = f"""
-    <div class="top"><h1>클릭 로그</h1><div><a class="btn btn2" href="/admin">관리자 홈</a></div></div>
-    <div class="card"><table><thead><tr><th>시간</th><th>코드</th><th>기기</th><th>IP</th><th>User-Agent</th></tr></thead><tbody>{rows_html}</tbody></table></div>
-    """
-    return page("클릭 로그", body)
+@app.post("/delete/{code}")
+def delete_link(request: Request, code: str):
+    if not require_login(request):
+        return RedirectResponse("/", status_code=303)
+    rows = [row for row in read_links() if row.get("code") != code]
+    write_links(rows)
+    return RedirectResponse("/admin?message=삭제했습니다", status_code=303)
+
+
+def log_click(request: Request, code: str, target_url: str) -> None:
+    ensure_files()
+    with CLICKS_FILE.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["timestamp", "code", "target_url", "ip", "user_agent", "referer"])
+        writer.writerow({
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "code": code,
+            "target_url": target_url,
+            "ip": request.client.host if request.client else "",
+            "user_agent": request.headers.get("user-agent", ""),
+            "referer": request.headers.get("referer", ""),
+        })
 
 
 @app.get("/{code}")
-def redirect_short(code: str, request: Request):
-    if code in ["favicon.ico", "robots.txt"]:
-        raise HTTPException(status_code=404)
-    links = read_links()
-    for item in links:
-        if item["code"] == code and item.get("active") == "1":
-            add_click(code, request)
-            return RedirectResponse(item["target_url"], status_code=302)
-    return page("링크 없음", "<div class='card'><h1>링크를 찾을 수 없습니다</h1><p>주소가 잘못되었거나 중지된 링크입니다.</p></div>")
+def redirect_code(request: Request, code: str):
+    if code in {"favicon.ico", "robots.txt"}:
+        return PlainTextResponse("", status_code=404)
+    link = find_link(code)
+    if not link:
+        return html_page("링크 없음", "<div class='card'><h1>링크를 찾을 수 없습니다</h1><p>주소를 다시 확인해주세요.</p></div>")
+    if link.get("active", "1") != "1":
+        return html_page("링크 중지", "<div class='card'><h1>중지된 링크입니다</h1><p>관리자에게 문의해주세요.</p></div>")
+    target_url = link.get("target_url", "")
+    log_click(request, code, target_url)
+    return RedirectResponse(target_url, status_code=302)
