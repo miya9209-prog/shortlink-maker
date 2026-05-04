@@ -28,7 +28,7 @@ ALLOWED_TARGET_DOMAINS = [
 
 app = FastAPI(title=APP_NAME)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+templates = Jinja2Templates(directory="templates")
 
 
 def load_links() -> Dict[str, Dict[str, Any]]:
