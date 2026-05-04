@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MISHARP Shortlink Login</title>
+  <style>
+    body{font-family:Arial,'Noto Sans KR',sans-serif;background:#f6f6f6;margin:0;padding:40px;color:#222}
+    .box{max-width:380px;margin:80px auto;background:white;padding:32px;border-radius:18px;box-shadow:0 8px 30px rgba(0,0,0,.08)}
+    h1{font-size:24px;margin:0 0 20px}.sub{color:#777;margin-bottom:20px}
+    input,button{width:100%;box-sizing:border-box;padding:13px;margin:8px 0;border-radius:10px;border:1px solid #ddd;font-size:15px}
+    button{background:#111;color:white;border:0;font-weight:700;cursor:pointer}.err{color:#c00;margin-top:10px}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>미샵 단축링크 관리자</h1>
+    <div class="sub">문자 발송용 단축 URL 관리</div>
+    <form method="post" action="/login">
+      <input name="admin_id" placeholder="아이디" required>
+      <input name="password" type="password" placeholder="비밀번호" required>
+      <button type="submit">로그인</button>
+    </form>
+    {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  </div>
+</body>
+</html>
