@@ -11,7 +11,7 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-APP_TITLE = "미샵 단축링크 관리자"
+APP_TITLE = "MISHARP 단축링크 생성기 MSH.KR"
 DATA_DIR = Path("data")
 LINKS_FILE = DATA_DIR / "links.csv"
 CLICKS_FILE = DATA_DIR / "clicks.csv"
@@ -179,7 +179,7 @@ def root(request: Request, error: str = ""):
     body = f"""
     <div class="card" style="max-width:520px;margin:80px auto;">
       <h1>{APP_TITLE}</h1>
-      <p class="muted">문자 발송용 짧은 링크를 만들고 클릭수를 확인합니다.</p>
+      <p class="muted">긴 URL주소를 단축 링크로 만들고 클릭수를 확인합니다.</p>
       {err}
       <form method="post" action="/login">
         <label>아이디</label>
