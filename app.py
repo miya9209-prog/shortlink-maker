@@ -239,7 +239,7 @@ def admin(request: Request, message: str = "", error: str = ""):
         click_rows += f"<tr><td>{c.get('timestamp','')}</td><td class='code'>/{c.get('code','')}</td><td>{c.get('ip','')}</td><td>{ua}</td></tr>"
     body = f"""
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-      <div><h1>{APP_TITLE}</h1><p class="muted">자동 3자리 랜덤 / 001 순차 / 수동 코드 생성 지원</p></div>
+      <div><h1>{APP_TITLE}</h1><p class="muted">긴 URL주소를 단축URL로 자동생성(주소 자동/직접입력 선택)</p></div>
       <a class="btn btn2" href="/logout">로그아웃</a>
     </div>
     {msg}{err}
