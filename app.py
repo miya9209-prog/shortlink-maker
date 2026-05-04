@@ -188,7 +188,7 @@ def root(request: Request, error: str = ""):
         <input name="password" type="password" autocomplete="current-password">
         <div style="margin-top:16px"><button type="submit">로그인</button></div>
       </form>
-      <p><small>초기값: misharp / misharp1234<br>Render 환경변수에서 반드시 변경하세요.</small></p>
+      </p>
     </div>
     """
     return html_page(APP_TITLE, body)
